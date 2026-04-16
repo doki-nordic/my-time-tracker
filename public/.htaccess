@@ -1,0 +1,8 @@
+# Deny direct web access to credential files and data files
+<FilesMatch "(uid|token)\.php$">
+    Require all denied
+</FilesMatch>
+
+<FilesMatch "(message\.txt|status\.json)$">
+    Require all denied
+</FilesMatch>

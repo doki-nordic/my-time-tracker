@@ -1,0 +1,160 @@
+I want to create a web application that shows me some status when I am working.
+When I am at work I want to use my old cell phone as my work status display.
+The phone will display a task that I am currently working on. It counts time that I spend on current task.
+I can change current task by sweeping up or down.
+I can change from work time to private time sweeping left or right.
+When I am in my private time, the time counter for current task stops counting.
+There should be also a "Administration" state also available by sweeping left or right.
+The status should also count total time that I spend working today (not including private time).
+I am working on Ubuntu. I want to track when I am locking the screen. 
+There should be a button that switches between "Office" and "Home" mode.
+In "Office" mode when computer is locked, application goes into "Administration" state.
+IN "Home" mode when computer is locked, application goes into "Private" state.
+Screen locking monitoring will be done with a Python script running on my computer.
+Example how to monitor screen locking in Ubuntu is in "lock-screen-monitor-example.js" file.
+The script will send messages to the server of current state (locked/unlocked).
+
+Entire system can be divided into four main components:
+* A web status application that shows the status on the old cell phone.
+* A web control panel that allows me to change tasks and view history of tasks and days.
+* A local Python script that monitors screen locking and sends messages to the server.
+* A PHP server script that passes messages and saves history and status persistently.
+
+# Web Status Application
+
+The web status application is mainly based on Swiper.js for handling the swipe gestures.
+Horizontal swipes will switch between "Administration", "Work", and "Private" states in that order.
+Vertical swipes are available only in "Work" state and will switch between different tasks.
+
+The application displays:
+- Current task name or "Administration" or "Private" based on the current state.
+- A time spend at work today (not including private time).
+- A time counter for the current task (only in "Work" state).
+- A time planned for the current task (only in "Work" state).
+- A button to switch between "Office" and "Home" mode.
+
+The application periodically sends the current state to the server to keep it updated and
+to save the history and allow restore state after a web application restart.
+
+It should also periodically check if new tasks are added, removed, or updated.
+
+It also checks locking status.
+
+It should be simple JS or TS application that can be easily run on the old cell phone.
+
+It should avoid screensaver and sleep mode of the phone. It can be achieved by playing a silent video in the background.
+Wake up API is not available in old phones.
+
+# Web Control Panel
+
+The web control panel is a separate interface that allows me to manage tasks and view history.
+
+It is react-based application that uses Material UI for the user interface.
+
+It shows a list of all tasks (active and inactive) with their properties:
+ - ID
+ - Name
+ - Active state (boolean)
+ - Comment
+ - Planned time
+ - Time spent (read-only) - including time adjustment
+ - Time adjustment
+
+User should be able to:
+ - Edit name, comment, planned time, and time adjustment for each task.
+ - Add new tasks.
+ - Delete tasks.
+ - Reorder tasks by dragging and dropping.
+ - Filter tasks by active state.
+
+Other view will show days history using special tasks with `-day-YYYY-MM-DD` and `-admin-YYYY-MM-DD`.
+
+# Both web applications
+
+Both web applications use node/npm for development and building.
+They are written in TypeScript and use vite for development and building.
+
+# Server
+
+The server serves both web applications as a static files.
+
+The PHP scripts can be placed in the "static" of the web applications to make sure they will be copied during
+build process.
+
+The scripts:
+ * `msg_send.php`
+   * Receives message in message variable of POST request.
+   * Opens 'message.txt' file for appending.
+   * Locks the file for writing.
+   * Writes the message to the file and separator `\n--------\nSePaRator\n--------\n`.
+   * Unlocks the file and closes it.
+ * `msg_read.php`
+   * Opens 'message.txt' file for reading and writing.
+   * Locks the file for writing.
+   * Reads entire content of the file and removes it (truncates the file).
+   * Unlocks the file and closes it.
+   * Returns the content of the file as response.
+   * If file is empty or does not exist, sleep for 1 second and repeat the process.
+   * If file is empty for 20 seconds, return empty response.
+ * `status.php`
+   * Receive array of tasks in POST request.
+   * Opens `status.json` file for reading and writing.
+   * Locks the file for writing.
+   * Reads the content of the file and decodes it as JSON.
+   * Update status with the received tasks
+     * Combine existing tasks with the received tasks. Received task may have only a subset of properties,
+      so we need to override existing properties with the received ones and keep the rest.
+     * If received task does not exist in existing tasks, add it to the list.
+     * If existing task does not exist in received tasks, keep it as it is.
+     * If received task has `deleted` property set to true, remove it from the list.
+   * Encode the updated status as JSON and write it to the file.
+   * Unlocks the file and closes it.
+   * Returns updated status as JSON response.
+     * If GET parameter `active` is set, filter tasks to return only active tasks.
+   * If no tasks are received, return entire status without changes.
+ * `login.php`
+   * There can be only one status application running at the same time.
+     If not, we can see undefined behavior, so we need to protect against it.
+     `login.php` will be used to ensure that.
+   * It checks if parameter `uid` is set in GET request and it is equal to `$uid` from `uid.php` file.
+   * If it is equal, it generates new random 16 character string, saves it to the ending of `token.php` file and returns it as response.
+     The `token.php` file has the following format:
+     ```
+     <?php $token = 'AAAAAAAAAAAAAAAA';
+     ```
+     Where `AAAAAAAAAAAAAAAA` is the random 16 character string.
+     This format is used to make sure that the content is not accessible from the web.
+   * `msg_read.php` and `status.php` will include this file and check if the token is valid before processing the request. If token is not valid, they will return an error response.
+   * `msg_send.php` will check if `$uid` is valid before processing the request (not `$token`).
+
+
+Each task is id that is unique. Some tasks are special to track time spent at work.
+
+Task properties:
+- `id` - unique identifier of the task.
+- `name` - name of the task.
+- `comment` - comment for the task.
+- `plannedTime` - planned time for the task in seconds.
+- `timeSpent` - time spent on the task in seconds.
+- `timeAdjust` - time adjustment for the task in seconds. It is changeable from the web control panel to adjust
+   time spent on the task. When displaying time spent on the task, we need to add `timeSpent` and `timeAdjust`
+   to get the total time spent on the task.
+- `active` - boolean indicating if the task is currently active.
+- `deleted` - boolean indicating if the task is deleted. If true, the task will be removed from the list.
+
+Special tasks:
+- `-day-YYYY-MM-DD` - task that tracks time spent at work for a specific day.
+- `-admin-YYYY-MM-DD` - task that tracks time spent in administration for a specific day.
+
+
+
+# A local Python script
+
+The script will monitor screen locking (example is in `lock-screen-monitor-example.js` file)
+and send messages to the server using `msg_send.php` script.
+Additionally, it will send current state once per minute to keep the server updated.
+
+# Your task
+
+Your task is to implement the entire system as described above, but don't do that just yet.
+I will be asking you to implement each part step by step.
