@@ -23,6 +23,17 @@ interface LockRestoreState {
   currentTaskId: string;
 }
 
+interface WakeLockSentinelLike {
+  released: boolean;
+  release(): Promise<void>;
+}
+
+type NavigatorWithWakeLock = Navigator & {
+  wakeLock?: {
+    request(type: 'screen'): Promise<WakeLockSentinelLike>;
+  };
+};
+
 const SEP = '\n--------\nSePaRator\n--------\n';
 const STATE_TASK_ID = '-status-state';
 const MODE_KEY = 'status-mode';
@@ -32,20 +43,23 @@ const appEl = document.getElementById('app');
 if (!appEl) throw new Error('Missing #app');
 
 appEl.innerHTML = `
-  <video id="keepawake-video" muted autoplay loop playsinline src="/keepalive.mp4"></video>
+  <video id="keepawake-video" muted autoplay loop playsinline src="./keepalive.mp4"></video>
 
   <div class="topbar">
-    <button class="mode-btn" id="mode-btn">In Office</button>
-    <button class="uid-btn" id="uid-btn">UID</button>
+    <div class="topbar-left">
+      <button class="mode-btn" id="mode-btn">In Office</button>
+      <button class="uid-btn" id="uid-btn">UID</button>
+    </div>
+    <button class="fullscreen-btn" id="fullscreen-btn">Full Screen</button>
   </div>
 
   <div class="swiper main-swiper" id="main-swiper">
     <div class="swiper-wrapper">
       <div class="swiper-slide state-admin">
         <div class="panel">
-          <div class="center-block">Administration</div>
+          <div class="center-block">Coffee, Meetings, e.t.c.</div>
           <div class="bottom">
-            <div class="metric" id="admin-total">Admin today: 0m</div>
+            <div class="metric" id="admin-total">Meetings today: 0m</div>
             <div class="metric" id="work-total-admin">Work today: 0m</div>
           </div>
         </div>
@@ -57,8 +71,7 @@ appEl.innerHTML = `
             <div class="swiper-wrapper" id="task-wrapper"></div>
           </div>
           <div class="bottom">
-            <div class="metric" id="task-time">Current task: 0m</div>
-            <div class="metric" id="task-planned">Planned: 0m</div>
+            <div class="metric" id="task-time">Current task: 0m <span class="metric-muted">of 0m</span></div>
             <div class="metric" id="work-total-work">Work today: 0m</div>
           </div>
         </div>
@@ -87,15 +100,16 @@ appEl.innerHTML = `
 `;
 
 const errorBox = document.getElementById('error-box') as HTMLDivElement;
+const keepAwakeVideo = document.getElementById('keepawake-video') as HTMLVideoElement;
 const modeBtn = document.getElementById('mode-btn') as HTMLButtonElement;
 const uidBtn = document.getElementById('uid-btn') as HTMLButtonElement;
+const fullscreenBtn = document.getElementById('fullscreen-btn') as HTMLButtonElement;
 const taskWrapper = document.getElementById('task-wrapper') as HTMLDivElement;
 const adminTotalEl = document.getElementById('admin-total') as HTMLDivElement;
 const workTotalAdminEl = document.getElementById('work-total-admin') as HTMLDivElement;
 const workTotalWorkEl = document.getElementById('work-total-work') as HTMLDivElement;
 const workTotalPrivateEl = document.getElementById('work-total-private') as HTMLDivElement;
 const taskTimeEl = document.getElementById('task-time') as HTMLDivElement;
-const taskPlannedEl = document.getElementById('task-planned') as HTMLDivElement;
 const authOverlay = document.getElementById('auth-overlay') as HTMLDivElement;
 const authOverlayMessage = document.getElementById('auth-overlay-message') as HTMLParagraphElement;
 const reconnectBtn = document.getElementById('reconnect-btn') as HTMLButtonElement;
@@ -127,6 +141,54 @@ let dirtyTaskIds = new Set<string>();
 let metaDirty = true;
 let lastTick = Date.now();
 let authStale = false;
+let wakeLockSentinel: WakeLockSentinelLike | null = null;
+
+const FETCH_MAX_ATTEMPTS = 5;
+const FETCH_RETRY_DELAY_MS = 350;
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function requestScreenWakeLock() {
+  const wakeLockApi = (navigator as NavigatorWithWakeLock).wakeLock;
+  if (!wakeLockApi) return;
+  if (document.visibilityState !== 'visible') return;
+  if (wakeLockSentinel && !wakeLockSentinel.released) return;
+
+  try {
+    wakeLockSentinel = await wakeLockApi.request('screen');
+  } catch {
+    // No-op by design when wake lock is unavailable or denied.
+  }
+}
+
+function wireWakeLock() {
+  void keepAwakeVideo.play().catch(() => {
+    // No-op; video keepalive is best-effort only.
+  });
+
+  void requestScreenWakeLock();
+  document.addEventListener('visibilitychange', () => {
+    if (document.visibilityState === 'visible') {
+      void requestScreenWakeLock();
+    }
+  });
+}
+
+async function fetchWithRetry(url: string, init?: RequestInit): Promise<Response> {
+  for (let attempt = 1; attempt <= FETCH_MAX_ATTEMPTS; attempt++) {
+    const res = await fetch(url, init);
+    if (res.status !== 503 || attempt === FETCH_MAX_ATTEMPTS) return res;
+
+    console.warn(
+      `[API] ${url} returned 503, retrying (${attempt}/${FETCH_MAX_ATTEMPTS})...`,
+    );
+    await delay(FETCH_RETRY_DELAY_MS * attempt);
+  }
+
+  throw new Error(`Request failed after ${FETCH_MAX_ATTEMPTS} attempts: ${url}`);
+}
 
 function setError(message: string) {
   if (authStale) return;
@@ -201,8 +263,7 @@ function updateTotalsUI() {
   const current = tasks[currentTaskId];
   const taskTime = current ? getTaskSeconds(currentTaskId) : 0;
   const planned = current?.plannedTime || 0;
-  taskTimeEl.textContent = `Current task: ${formatTime(taskTime)}`;
-  taskPlannedEl.textContent = `Planned: ${formatTime(planned)}`;
+  taskTimeEl.innerHTML = `Current task: ${formatTime(taskTime)} <span class="metric-muted">of ${formatTime(planned)}</span>`;
 }
 
 function sortedActiveTasks(map: TaskMap): Task[] {
@@ -323,27 +384,28 @@ function collectStatePatch(): Record<string, Partial<Task>> {
   for (const id of dirtyTaskIds) {
     const t = tasks[id];
     if (!t) continue;
+
+    // The status app owns elapsed counters only. Keep names/comments/order/etc.
+    // authoritative on the server so control-panel edits are not overwritten.
+    if (id.startsWith('-day-') || id.startsWith('-admin-')) {
+      patch[id] = {
+        name: t.name,
+        active: false,
+        timeSpent: t.timeSpent || 0,
+      };
+      continue;
+    }
+
     patch[id] = {
-      id: t.id,
-      name: t.name,
-      comment: t.comment || '',
-      plannedTime: t.plannedTime || 0,
       timeSpent: t.timeSpent || 0,
-      timeAdjust: t.timeAdjust || 0,
-      active: !!t.active,
-      order: t.order,
     };
   }
 
   if (metaDirty) {
     patch[STATE_TASK_ID] = {
-      id: STATE_TASK_ID,
       name: 'Status App State',
       comment: JSON.stringify({ mode, viewState, currentTaskId, lockState, ts: Date.now() }),
       active: false,
-      plannedTime: 0,
-      timeSpent: 0,
-      timeAdjust: 0,
     };
   }
 
@@ -392,9 +454,9 @@ function normalizeTaskMap(raw: unknown): TaskMap {
 }
 
 async function apiLogin(uidParam: string): Promise<string> {
-  const url = `/login.php?uid=${encodeURIComponent(uidParam)}`;
+  const url = `./login.php?uid=${encodeURIComponent(uidParam)}`;
   console.log(`[API] GET ${url}`);
-  const res = await fetch(url);
+  const res = await fetchWithRetry(url);
   const txt = await res.text();
   console.log(`[API] Response status: ${res.status}, body: ${txt.slice(0, 200)}`);
   if (!res.ok) {
@@ -404,9 +466,9 @@ async function apiLogin(uidParam: string): Promise<string> {
 }
 
 async function apiReadStatus(): Promise<TaskMap> {
-  const url = '/status.php';
+  const url = './status.php';
   console.log(`[API] GET ${url}`);
-  const res = await fetch(url);
+  const res = await fetchWithRetry(url);
   const txt = await res.text();
   console.log(`[API] Response status: ${res.status}, body length: ${txt.length}`);
   if (!res.ok) throw new Error(`GET status failed (${res.status})`);
@@ -415,11 +477,11 @@ async function apiReadStatus(): Promise<TaskMap> {
 }
 
 async function apiPostStatus(patch: Record<string, Partial<Task>>) {
-  const url = '/status.php';
+  const url = './status.php';
   const body = JSON.stringify({ token, tasks: patch });
   console.log(`[API] POST ${url}`);
   console.log(`[API] Body: ${body.slice(0, 300)}`);
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: body,
@@ -437,12 +499,12 @@ async function apiPostStatus(patch: Record<string, Partial<Task>>) {
 }
 
 async function apiReadMessages(): Promise<string[]> {
-  const url = '/msg_read.php';
+  const url = './msg_read.php';
   const body = `token=${encodeURIComponent(token)}`;
   console.log(`[API] POST ${url}`);
   console.log(`[API] Body: ${body}`);
   console.log(`[API] Token value: "${token}" (length: ${token.length})`);
-  const res = await fetch(url, {
+  const res = await fetchWithRetry(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
     body: body,
@@ -492,9 +554,10 @@ async function syncState() {
   const patch = collectStatePatch();
   if (Object.keys(patch).length === 0) return;
   const serverTasks = await apiPostStatus(patch);
-  tasks = { ...tasks, ...serverTasks };
+  tasks = serverTasks;
   dirtyTaskIds.clear();
   metaDirty = false;
+  restoreFromMeta();
   renderTaskSlides();
 }
 
@@ -570,6 +633,18 @@ function wireEvents() {
     window.location.reload();
   });
 
+  fullscreenBtn.addEventListener('click', async () => {
+    try {
+      if (document.fullscreenElement) {
+        await document.exitFullscreen();
+      } else {
+        await document.documentElement.requestFullscreen();
+      }
+    } catch {
+      // No-op by design if fullscreen API is unavailable or denied.
+    }
+  });
+
   modeBtn.addEventListener('click', () => {
     markUserInteraction();
     setMode(mode === 'office' ? 'home' : 'office');
@@ -588,30 +663,29 @@ function wireEvents() {
   mainSwiper.on('slideChange', () => {
     const i = mainSwiper.activeIndex;
     const st: ViewState = i === 0 ? 'administration' : i === 1 ? 'work' : 'private';
+    if (lockState && st !== viewState) {
+      markUserInteraction();
+    }
     setViewState(st, 'swiper');
-  });
-
-  mainSwiper.on('touchStart', () => {
-    markUserInteraction();
   });
 
   taskSwiper.on('slideChange', () => {
     const id = activeTaskIds[taskSwiper.activeIndex];
-    if (id) {
+    if (id && id !== currentTaskId) {
+      if (lockState) {
+        markUserInteraction();
+      }
       currentTaskId = id;
       metaDirty = true;
       updateTotalsUI();
     }
-  });
-
-  taskSwiper.on('touchStart', () => {
-    markUserInteraction();
   });
 }
 
 async function bootstrap() {
   try {
     setMode(mode);
+    wireWakeLock();
     wireEvents();
     await ensureUidAndToken();
     tasks = await apiReadStatus();

@@ -21,6 +21,7 @@ body {
   position: relative;
   width: 100vw;
   height: 100vh;
+  height: 100dvh;
   overflow: hidden;
 }
 
@@ -40,6 +41,12 @@ body {
   left: 8px;
   right: 8px;
   z-index: 30;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+}
+
+.topbar-left {
   display: flex;
   gap: 8px;
 }
@@ -73,9 +80,20 @@ body {
   font-size: 12px;
 }
 
+.fullscreen-btn {
+  border: 0;
+  border-radius: 999px;
+  padding: 10px 14px;
+  font-size: 13px;
+  font-weight: 700;
+  color: #f8fafc;
+  background: #2563eb;
+}
+
 .main-swiper {
   width: 100vw;
   height: 100vh;
+  height: 100dvh;
 }
 
 .swiper-slide {
@@ -89,7 +107,7 @@ body {
   height: 100%;
   display: grid;
   grid-template-rows: 1fr auto;
-  padding: 56px 16px 18px;
+  padding: 56px 16px calc(18px + env(safe-area-inset-bottom, 0px));
 }
 
 .center-block {
@@ -103,7 +121,7 @@ body {
 }
 
 .state-admin {
-  background: radial-gradient(120% 100% at 30% 20%, #3f2918 0%, #1e1209 55%, #120b07 100%);
+  background: radial-gradient(120% 100% at 30% 20%, #2c3f18 0%, #101e09 55%, #091207 100%);
 }
 
 .state-work {
@@ -111,7 +129,7 @@ body {
 }
 
 .state-private {
-  background: radial-gradient(120% 100% at 30% 20%, #2f2348 0%, #1a1230 55%, #120a23 100%);
+  background: radial-gradient(120% 100% at 30% 20%, #482c23 0%, #301612 55%, #230a14 100%);
 }
 
 .task-swiper {
@@ -137,14 +155,14 @@ body {
 
 .task-name {
   margin: 0 0 8px;
-  font-size: clamp(28px, 7vw, 52px);
+  font-size: clamp(17px, 4.2vw, 31px);
   line-height: 1.05;
   font-weight: 800;
 }
 
 .task-comment {
   margin: 0;
-  font-size: clamp(14px, 3.5vw, 20px);
+  font-size: clamp(9px, 2.1vw, 12px);
   opacity: 0.9;
 }
 
@@ -157,6 +175,10 @@ body {
 .metric {
   font-size: clamp(15px, 3.6vw, 22px);
   font-weight: 700;
+}
+
+.metric-muted {
+  opacity: 0.5;
 }
 
 .error-box {
