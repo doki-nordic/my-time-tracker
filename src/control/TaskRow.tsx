@@ -6,6 +6,10 @@ import {
   TableRow,
   TableCell,
   Tooltip,
+  Popover,
+  Box,
+  Button,
+  Typography,
 } from '@mui/material';
 import {
   Delete as DeleteIcon,
@@ -13,25 +17,45 @@ import {
   Check as CheckIcon,
   Close as CloseIcon,
   Edit as EditIcon,
+  AccessTime as TimeIcon,
 } from '@mui/icons-material';
 import { useSortable } from '@dnd-kit/sortable';
 import { CSS } from '@dnd-kit/utilities';
 import type { Task } from './types';
-import { formatTime, parseTime } from './timeUtils';
+import { parseAdjustTime, formatDuration } from './timeUtils';
 
 interface Props {
   task: Task;
+  timeSpent: number;
   onSave: (id: string, changes: Partial<Task>) => void;
   onDelete: (id: string) => void;
+  onAdjustTime: (id: string, seconds: number) => void;
 }
 
-export default function TaskRow({ task, onSave, onDelete }: Props) {
+export default function TaskRow({ task, timeSpent, onSave, onDelete, onAdjustTime }: Props) {
   const [editing, setEditing] = useState(false);
   const [name, setName] = useState(task.name);
-  const [comment, setComment] = useState(task.comment);
-  const [plannedTime, setPlannedTime] = useState(formatTime(task.plannedTime));
-  const [timeAdjust, setTimeAdjust] = useState(formatTime(task.timeAdjust));
-  const [timeError, setTimeError] = useState<'planned' | 'adjust' | ''>('');
+  const [adjustAnchor, setAdjustAnchor] = useState<HTMLElement | null>(null);
+  const [adjustInput, setAdjustInput] = useState('');
+  const [adjustError, setAdjustError] = useState('');
+
+  const openAdjust = (el: HTMLElement) => {
+    setAdjustInput('');
+    setAdjustError('');
+    setAdjustAnchor(el);
+  };
+
+  const submitAdjust = () => {
+    const seconds = parseAdjustTime(adjustInput);
+    if (seconds === null) {
+      setAdjustError('Format: [+/-]H:MM or minutes. Range: -3:59 to +3:59');
+      return;
+    }
+    onAdjustTime(task.id, seconds);
+    setAdjustAnchor(null);
+    setAdjustInput('');
+    setAdjustError('');
+  };
 
   const {
     attributes,
@@ -50,25 +74,15 @@ export default function TaskRow({ task, onSave, onDelete }: Props) {
 
   const startEdit = () => {
     setName(task.name);
-    setComment(task.comment);
-    setPlannedTime(formatTime(task.plannedTime));
-    setTimeAdjust(formatTime(task.timeAdjust));
     setEditing(true);
   };
 
-  const cancelEdit = () => { setEditing(false); setTimeError(''); };
+  const cancelEdit = () => { setEditing(false); };
 
   const saveEdit = () => {
-    const pt = parseTime(plannedTime);
-    const ta = parseTime(timeAdjust);
-    if (pt === null) { setTimeError('planned'); return; }
-    if (ta === null) { setTimeError('adjust'); return; }
-    setTimeError('');
-    onSave(task.id, { name, comment, plannedTime: pt, timeAdjust: ta });
+    onSave(task.id, { name });
     setEditing(false);
   };
-
-  const totalTime = task.timeSpent + task.timeAdjust;
 
   return (
     <TableRow ref={setNodeRef} style={style} hover>
@@ -80,7 +94,13 @@ export default function TaskRow({ task, onSave, onDelete }: Props) {
       </TableCell>
       <TableCell>
         {editing ? (
-          <TextField size="small" fullWidth value={name} onChange={(e) => setName(e.target.value)} />
+          <TextField
+            size="small"
+            fullWidth
+            value={name}
+            onChange={(e) => setName(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && saveEdit()}
+          />
         ) : (
           task.name
         )}
@@ -91,42 +111,7 @@ export default function TaskRow({ task, onSave, onDelete }: Props) {
           onChange={(_, checked) => onSave(task.id, { active: checked })}
         />
       </TableCell>
-      <TableCell>
-        {editing ? (
-          <TextField size="small" fullWidth value={comment} onChange={(e) => setComment(e.target.value)} />
-        ) : (
-          task.comment
-        )}
-      </TableCell>
-      <TableCell>
-        {editing ? (
-          <TextField
-            size="small"
-            value={plannedTime}
-            onChange={(e) => { setPlannedTime(e.target.value); setTimeError(''); }}
-            error={timeError === 'planned'}
-            helperText={timeError === 'planned' ? 'e.g. 1d 2h 30m' : ''}
-            sx={{ width: 120 }}
-          />
-        ) : (
-          formatTime(task.plannedTime)
-        )}
-      </TableCell>
-      <TableCell>{formatTime(totalTime)}</TableCell>
-      <TableCell>
-        {editing ? (
-          <TextField
-            size="small"
-            value={timeAdjust}
-            onChange={(e) => { setTimeAdjust(e.target.value); setTimeError(''); }}
-            error={timeError === 'adjust'}
-            helperText={timeError === 'adjust' ? 'e.g. 1d 2h 30m' : ''}
-            sx={{ width: 120 }}
-          />
-        ) : (
-          formatTime(task.timeAdjust)
-        )}
-      </TableCell>
+      <TableCell>{formatDuration(timeSpent)}</TableCell>
       <TableCell padding="none">
         {editing ? (
           <>
@@ -148,6 +133,11 @@ export default function TaskRow({ task, onSave, onDelete }: Props) {
                 <EditIcon fontSize="small" />
               </IconButton>
             </Tooltip>
+            <Tooltip title="Adjust time">
+              <IconButton size="small" onClick={(e) => openAdjust(e.currentTarget)}>
+                <TimeIcon fontSize="small" />
+              </IconButton>
+            </Tooltip>
             <Tooltip title="Delete">
               <IconButton size="small" onClick={() => onDelete(task.id)} color="error">
                 <DeleteIcon fontSize="small" />
@@ -156,6 +146,32 @@ export default function TaskRow({ task, onSave, onDelete }: Props) {
           </>
         )}
       </TableCell>
+      <Popover
+        open={Boolean(adjustAnchor)}
+        anchorEl={adjustAnchor}
+        onClose={() => setAdjustAnchor(null)}
+        anchorOrigin={{ vertical: 'bottom', horizontal: 'left' }}
+        disableRestoreFocus
+      >
+        <Box sx={{ p: 2, display: 'flex', flexDirection: 'column', gap: 1, minWidth: 220 }}>
+          <Typography variant="subtitle2">Adjust time for {task.id}</Typography>
+          <TextField
+            size="small"
+            label="Time"
+            placeholder="+1:30, -45, 2h 30m"
+            value={adjustInput}
+            onChange={(e) => { setAdjustInput(e.target.value); setAdjustError(''); }}
+            onKeyDown={(e) => e.key === 'Enter' && submitAdjust()}
+            error={Boolean(adjustError)}
+            helperText={adjustError || 'H:MM, minutes, or Xh Ym'}
+            autoFocus
+          />
+          <Box sx={{ display: 'flex', gap: 1, justifyContent: 'flex-end' }}>
+            <Button size="small" onClick={() => setAdjustAnchor(null)}>Cancel</Button>
+            <Button size="small" variant="contained" onClick={submitAdjust}>Apply</Button>
+          </Box>
+        </Box>
+      </Popover>
     </TableRow>
   );
 }

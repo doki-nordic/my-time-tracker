@@ -1,4 +1,4 @@
-import type { TaskMap, StatusResponse } from './types';
+import type { TaskMap, StatusResponse, TaskTrackResponse } from './types';
 
 const BASE = '.';
 const FETCH_MAX_ATTEMPTS = 5;
@@ -18,7 +18,7 @@ async function fetchWithRetry(url: string, init?: RequestInit): Promise<Response
   throw new Error(`Request failed after ${FETCH_MAX_ATTEMPTS} attempts: ${url}`);
 }
 
-async function parseJson(res: Response): Promise<StatusResponse> {
+async function parseJson<T = StatusResponse>(res: Response): Promise<T> {
   const text = await res.text();
   try {
     return JSON.parse(text);
@@ -52,4 +52,46 @@ export async function updateTasks(
   }
   const data = await parseJson(res);
   return data.tasks ?? {};
+}
+
+export async function fetchTaskTrack(uid: string): Promise<TaskTrackResponse> {
+  const res = await fetchWithRetry(`${BASE}/task_track.php`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ uid }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`POST task_track failed (${res.status}): ${text.slice(0, 200)}`);
+  }
+  return parseJson<TaskTrackResponse>(res);
+}
+
+export async function adjustTrack(
+  uid: string,
+  day: number,
+  task: string,
+  seconds: number,
+): Promise<void> {
+  const res = await fetchWithRetry(`${BASE}/adjust_track.php`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ uid, day, task, seconds }),
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`POST adjust_track failed (${res.status}): ${text.slice(0, 200)}`);
+  }
+}
+
+export async function sendUpdateMessage(uid: string): Promise<void> {
+  const res = await fetchWithRetry(`${BASE}/msg_send.php`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: `uid=${encodeURIComponent(uid)}&message=update`,
+  });
+  if (!res.ok) {
+    const text = await res.text();
+    throw new Error(`POST msg_send failed (${res.status}): ${text.slice(0, 200)}`);
+  }
 }

@@ -1,111 +1,101 @@
 <?php
 ini_set('display_errors', '0');
-
-$file_path = __DIR__ . '/status.json';
-$is_post = $_SERVER['REQUEST_METHOD'] === 'POST';
+require __DIR__ . '/auth.php';
 
 header('Content-Type: application/json');
 
-// POST requests require token OR uid authentication
+$is_post = $_SERVER['REQUEST_METHOD'] === 'POST';
+
 if ($is_post) {
     $input = json_decode(file_get_contents('php://input'), true);
     if ($input === null) {
         $input = [];
     }
-
-    require __DIR__ . '/uid.php';
-    require __DIR__ . '/token.php';
-    $request_token = $input['token'] ?? '';
-    $request_uid = $input['uid'] ?? '';
-
-    $token_ok = ($request_token !== '' && $request_token === $token);
-    $uid_ok = ($request_uid !== '' && $request_uid === $uid);
-
-    if (!$token_ok && !$uid_ok) {
-        http_response_code(403);
-        echo json_encode(['error' => 'Forbidden']);
-        exit;
-    }
-
+    authenticate($input);
     $received_tasks = $input['tasks'] ?? [];
 } else {
     $received_tasks = [];
 }
 
-// Read existing status
-$tasks = [];
+$db_path = __DIR__ . '/status.sqlite';
+if (!$is_post && !file_exists($db_path)) {
+    echo json_encode(['tasks' => new stdClass()]);
+    exit;
+}
 
-if (file_exists($file_path)) {
-    $fp = fopen($file_path, 'c+');
-    if ($fp === false) {
-        http_response_code(500);
-        echo json_encode(['error' => 'Server error']);
-        exit;
-    }
+$db = open_db();
 
-    flock($fp, LOCK_EX);
+// Write tasks
+if (!empty($received_tasks)) {
+    $db->exec('BEGIN TRANSACTION');
 
-    $content = stream_get_contents($fp);
-    $status = ($content !== '' && $content !== false) ? json_decode($content, true) : [];
-    if (!is_array($status)) {
-        $status = [];
-    }
-
-    $tasks = $status['tasks'] ?? [];
-
-    // Merge received tasks
-    if (!empty($received_tasks)) {
-        foreach ($received_tasks as $id => $received_task) {
-            if (isset($received_task['deleted']) && $received_task['deleted'] === true) {
-                unset($tasks[$id]);
-                continue;
-            }
-
-            if (isset($tasks[$id])) {
-                $tasks[$id] = array_merge($tasks[$id], $received_task);
-            } else {
-                $received_task['id'] = $id;
-                $tasks[$id] = $received_task;
-            }
-
-            unset($tasks[$id]['deleted']);
-        }
-
-        $status['tasks'] = $tasks;
-        fseek($fp, 0);
-        ftruncate($fp, 0);
-        fwrite($fp, json_encode($status, JSON_PRETTY_PRINT));
-    }
-
-    flock($fp, LOCK_UN);
-    fclose($fp);
-} elseif (!empty($received_tasks)) {
-    // File doesn't exist yet — create it
-    $status = ['tasks' => []];
-    $tasks = [];
-
-    foreach ($received_tasks as $id => $received_task) {
-        if (isset($received_task['deleted']) && $received_task['deleted'] === true) {
+    foreach ($received_tasks as $id => $task) {
+        if (isset($task['deleted']) && $task['deleted'] === true) {
+            $stmt = $db->prepare('DELETE FROM tasks WHERE id = :id');
+            $stmt->bindValue(':id', $id, SQLITE3_TEXT);
+            $stmt->execute();
             continue;
         }
-        $received_task['id'] = $id;
-        unset($received_task['deleted']);
-        $tasks[$id] = $received_task;
+
+        // Check if task exists
+        $check = $db->prepare('SELECT id FROM tasks WHERE id = :id');
+        $check->bindValue(':id', $id, SQLITE3_TEXT);
+        $exists = $check->execute()->fetchArray(SQLITE3_ASSOC) !== false;
+
+        if ($exists) {
+            // Update only provided columns
+            $updates = [];
+            $params = [];
+            if (array_key_exists('name', $task)) {
+                $updates[] = 'name = :name';
+                $params[':name'] = [SQLITE3_TEXT, $task['name']];
+            }
+            if (array_key_exists('active', $task)) {
+                $updates[] = 'active = :active';
+                $params[':active'] = [SQLITE3_INTEGER, $task['active'] ? 1 : 0];
+            }
+            if (array_key_exists('order', $task)) {
+                $updates[] = '[order] = :order';
+                $params[':order'] = [SQLITE3_INTEGER, (int)$task['order']];
+            }
+            if (!empty($updates)) {
+                $sql = 'UPDATE tasks SET ' . implode(', ', $updates) . ' WHERE id = :id';
+                $stmt = $db->prepare($sql);
+                $stmt->bindValue(':id', $id, SQLITE3_TEXT);
+                foreach ($params as $param => [$type, $value]) {
+                    $stmt->bindValue($param, $value, $type);
+                }
+                $stmt->execute();
+            }
+        } else {
+            // Insert new row
+            $stmt = $db->prepare('INSERT INTO tasks (id, name, active, [order]) VALUES (:id, :name, :active, :order)');
+            $stmt->bindValue(':id', $id, SQLITE3_TEXT);
+            $stmt->bindValue(':name', $task['name'], SQLITE3_TEXT);
+            $stmt->bindValue(':active', $task['active'] ? 1 : 0, SQLITE3_INTEGER);
+            $stmt->bindValue(':order', (int)($task['order'] ?? 0), SQLITE3_INTEGER);
+            $stmt->execute();
+        }
     }
 
-    $status['tasks'] = $tasks;
-    if (file_put_contents($file_path, json_encode($status, JSON_PRETTY_PRINT), LOCK_EX) === false) {
-        http_response_code(500);
-        echo json_encode(['error' => 'Server error: cannot create status file']);
-        exit;
-    }
+    $db->exec('COMMIT');
 }
 
-// Filter active tasks if requested
+// Read tasks
+$sql = 'SELECT id, name, active, [order] FROM tasks';
 if (isset($_GET['active'])) {
-    $tasks = array_filter($tasks, function ($task) {
-        return !empty($task['active']);
-    });
+    $sql .= ' WHERE active = 1';
+}
+$result = $db->query($sql);
+
+$tasks = new stdClass();
+while ($row = $result->fetchArray(SQLITE3_ASSOC)) {
+    $t = new stdClass();
+    $t->id = $row['id'];
+    $t->name = $row['name'];
+    $t->active = (bool)$row['active'];
+    $t->order = (int)$row['order'];
+    $tasks->{$row['id']} = $t;
 }
 
-echo json_encode(['tasks' => (object)$tasks]);
+echo json_encode(['tasks' => $tasks]);

@@ -30,7 +30,7 @@ import {
   arrayMove,
 } from '@dnd-kit/sortable';
 import type { Task, TaskMap } from './types';
-import { fetchTasks, updateTasks } from './api';
+import { fetchTasks, updateTasks, fetchTaskTrack, adjustTrack, sendUpdateMessage } from './api';
 import TaskRowComponent from './TaskRow';
 
 type Filter = 'all' | 'active' | 'inactive';
@@ -42,6 +42,7 @@ interface Props {
 export default function TaskList({ uid }: Props) {
   const [tasks, setTasks] = useState<TaskMap>({});
   const [order, setOrder] = useState<string[]>([]);
+  const [timeByTask, setTimeByTask] = useState<Record<string, number>>({});
   const [filter, setFilter] = useState<Filter>('active');
   const [error, setError] = useState('');
   const [newId, setNewId] = useState('');
@@ -55,29 +56,38 @@ export default function TaskList({ uid }: Props) {
     try {
       const t = await fetchTasks();
       setTasks(t);
-      setOrder((prev) => {
-        const ids = Object.keys(t).filter((id) => !id.startsWith('-'));
-        // Sort by saved order, fallback to previous local order, then append new
-        ids.sort((a, b) => (t[a].order ?? Infinity) - (t[b].order ?? Infinity));
-        const known = prev.filter((id) => ids.includes(id));
-        const added = ids.filter((id) => !prev.includes(id));
-        // If server has order info, prefer it; otherwise keep local order
-        const hasServerOrder = ids.some((id) => t[id].order !== undefined);
-        return hasServerOrder ? ids : [...known, ...added];
+      setOrder(() => {
+        const ids = Object.keys(t);
+        ids.sort((a, b) => t[a].order - t[b].order);
+        return ids;
       });
       setError('');
     } catch (e) {
       setError(String(e));
     }
-  }, []);
+    try {
+      const data = await fetchTaskTrack(uid);
+      const totals: Record<string, number> = {};
+      for (const entry of data.track) {
+        const seconds = entry.end_time - entry.start_time;
+        totals[entry.task] = (totals[entry.task] ?? 0) + seconds;
+      }
+      setTimeByTask(totals);
+    } catch {
+      // non-critical
+    }
+  }, [uid]);
 
   useEffect(() => { load(); }, [load]);
+
+  const notify = () => { void sendUpdateMessage(uid); };
 
   const save = async (id: string, changes: Partial<Task>) => {
     try {
       const result = await updateTasks(uid, { [id]: changes });
       setTasks(result);
       setError('');
+      notify();
     } catch (e) {
       setError(String(e));
     }
@@ -89,6 +99,20 @@ export default function TaskList({ uid }: Props) {
       setTasks(result);
       setOrder((prev) => prev.filter((x) => x !== id));
       setError('');
+      notify();
+    } catch (e) {
+      setError(String(e));
+    }
+  };
+
+  const handleAdjustTime = async (taskId: string, seconds: number) => {
+    const now = new Date();
+    const d = now.getHours() < 4 ? new Date(now.getFullYear(), now.getMonth(), now.getDate() - 1) : now;
+    const day = d.getFullYear() * 10000 + (d.getMonth() + 1) * 100 + d.getDate();
+    try {
+      await adjustTrack(uid, day, taskId, seconds);
+      await load();
+      notify();
     } catch (e) {
       setError(String(e));
     }
@@ -106,12 +130,13 @@ export default function TaskList({ uid }: Props) {
     }
     try {
       const result = await updateTasks(uid, {
-        [id]: { name, comment: '', plannedTime: 0, timeSpent: 0, timeAdjust: 0, active: true },
+        [id]: { name, active: true, order: order.length },
       });
       setTasks(result);
       setOrder((prev) => [...prev, id]);
       setNewId('');
       setError('');
+      notify();
     } catch (e) {
       setError(String(e));
     }
@@ -136,13 +161,13 @@ export default function TaskList({ uid }: Props) {
         const result = await updateTasks(uid, orderUpdate);
         setTasks(result);
         setError('');
+        notify();
       } catch (e) {
         setError(String(e));
       }
     }
   };
 
-  // Filter and order tasks (exclude special day/admin tasks)
   const visibleIds = order.filter((id) => {
     const task = tasks[id];
     if (!task) return false;
@@ -191,10 +216,7 @@ export default function TaskList({ uid }: Props) {
                   <TableCell>ID</TableCell>
                   <TableCell>Name</TableCell>
                   <TableCell padding="checkbox">Active</TableCell>
-                  <TableCell>Comment</TableCell>
-                  <TableCell>Planned</TableCell>
-                  <TableCell>Spent</TableCell>
-                  <TableCell>Adjust</TableCell>
+                  <TableCell>Time</TableCell>
                   <TableCell padding="none">Actions</TableCell>
                 </TableRow>
               </TableHead>
@@ -203,8 +225,10 @@ export default function TaskList({ uid }: Props) {
                   <TaskRowComponent
                     key={id}
                     task={tasks[id]}
+                    timeSpent={timeByTask[id] ?? 0}
                     onSave={save}
                     onDelete={handleDelete}
+                    onAdjustTime={handleAdjustTime}
                   />
                 ))}
               </TableBody>

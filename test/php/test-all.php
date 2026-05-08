@@ -98,8 +98,21 @@ echo "=== Setting up test environment ===\n";
 file_put_contents("$webroot/uid.php", "<?php \$uid = '$testUid';\n");
 @unlink("$webroot/token.php");
 @unlink("$webroot/message.txt");
-@unlink("$webroot/status.json");
+@unlink("$webroot/status.sqlite");
 file_put_contents("$webroot/token.php", "<?php \$token = '';\n");
+
+// Create template SQLite database
+$templatePath = "$webroot/status-template.sqlite";
+@unlink($templatePath);
+$db = new SQLite3($templatePath);
+$db->exec('CREATE TABLE conf (key TEXT PRIMARY KEY NOT NULL, value ANY) STRICT');
+$db->exec('CREATE TABLE tasks (id TEXT PRIMARY KEY NOT NULL, name TEXT NOT NULL, active INTEGER NOT NULL, [order] INTEGER NOT NULL) STRICT');
+$db->exec('CREATE TABLE track (id INTEGER PRIMARY KEY AUTOINCREMENT NOT NULL, day INTEGER NOT NULL, start_time INTEGER NOT NULL, end_time INTEGER NOT NULL, task TEXT NOT NULL, manual INTEGER NOT NULL) STRICT');
+$db->exec('CREATE INDEX tasks_active ON tasks (active)');
+$db->exec('CREATE INDEX track_day ON track (day)');
+$db->exec('CREATE INDEX track_task ON track (task)');
+$db->close();
+chmod($templatePath, 0666);
 
 // Make files writable by Apache (www-data, uid 33)
 chmod("$webroot/uid.php", 0666);
@@ -223,8 +236,8 @@ assert_eq('status: POST wrong token returns 403', 403, $r['code']);
 $r = http_post_json("$base/status.php", [
     'token' => $token,
     'tasks' => [
-        'task1' => ['name' => 'First task', 'active' => true, 'plannedTime' => 3600],
-        'task2' => ['name' => 'Second task', 'active' => false, 'plannedTime' => 7200],
+        'task1' => ['name' => 'First task', 'active' => true, 'order' => 10],
+        'task2' => ['name' => 'Second task', 'active' => false, 'order' => 20],
     ],
 ]);
 assert_eq('status: POST add returns 200', 200, $r['code']);
@@ -232,6 +245,8 @@ $data = json_decode($r['body'], true);
 assert_eq('status: response has task1', true, isset($data['tasks']['task1']));
 assert_eq('status: response has task2', true, isset($data['tasks']['task2']));
 assert_eq('status: task1 name correct', 'First task', $data['tasks']['task1']['name']);
+assert_eq('status: task1 active correct', true, $data['tasks']['task1']['active']);
+assert_eq('status: task1 order correct', 10, $data['tasks']['task1']['order']);
 
 // 4.5 GET persisted
 $r = http_get("$base/status.php");
@@ -245,14 +260,15 @@ $data = json_decode($r['body'], true);
 assert_eq('status: active filter includes task1', true, isset($data['tasks']['task1']));
 assert_eq('status: active filter excludes task2', false, isset($data['tasks']['task2']));
 
-// 4.7 Partial update (merge)
+// 4.7 Partial update (write only provided fields)
 $r = http_post_json("$base/status.php", [
     'token' => $token,
-    'tasks' => ['task1' => ['timeSpent' => 120]],
+    'tasks' => ['task1' => ['name' => 'Updated task']],
 ]);
 $data = json_decode($r['body'], true);
-assert_eq('status: merge keeps name', 'First task', $data['tasks']['task1']['name']);
-assert_eq('status: merge updates timeSpent', 120, $data['tasks']['task1']['timeSpent']);
+assert_eq('status: write updates name', 'Updated task', $data['tasks']['task1']['name']);
+assert_eq('status: write keeps active', true, $data['tasks']['task1']['active']);
+assert_eq('status: write keeps order', 10, $data['tasks']['task1']['order']);
 
 // 4.8 Delete task
 $r = http_post_json("$base/status.php", [
@@ -268,19 +284,233 @@ $r = http_get("$base/status.php");
 $data = json_decode($r['body'], true);
 assert_eq('status: deleted flag not in stored task1', false, isset($data['tasks']['task1']['deleted']));
 
-// 4.10 Special day task
-$today = date('Y-m-d');
-$r = http_post_json("$base/status.php", [
-    'token' => $token,
-    'tasks' => ["-day-$today" => ['name' => "Day $today", 'timeSpent' => 3600, 'active' => true]],
-]);
-$data = json_decode($r['body'], true);
-assert_eq('status: special day task added', true, isset($data['tasks']["-day-$today"]));
-
-// 4.11 Empty tasks POST = read-only
+// 4.10 Empty tasks POST = read-only
 $r = http_post_json("$base/status.php", ['token' => $token, 'tasks' => new stdClass()]);
 $data = json_decode($r['body'], true);
 assert_eq('status: empty POST returns existing task1', true, isset($data['tasks']['task1']));
+
+// 4.11 Auth with uid
+$r = http_post_json("$base/status.php", [
+    'uid' => $testUid,
+    'tasks' => ['task1' => ['name' => 'Uid update']],
+]);
+$data = json_decode($r['body'], true);
+assert_eq('status: uid auth works', 'Uid update', $data['tasks']['task1']['name']);
+
+echo "\n";
+
+// ============================================================
+echo "=== 5. track.php ===\n";
+// ============================================================
+
+// 5.1 POST without auth
+$r = http_post_json("$base/track.php", ['entries' => []]);
+assert_eq('track: missing auth returns 403', 403, $r['code']);
+
+// 5.2 Insert new track entry
+$r = http_post_json("$base/track.php", [
+    'token' => $token,
+    'entries' => [['day' => 20260507, 'time' => 36000, 'task' => 'task1']],
+]);
+assert_eq('track: insert returns 200', 200, $r['code']);
+$data = json_decode($r['body'], true);
+assert_eq('track: response has track key', true, isset($data['track']));
+assert_eq('track: one row returned', 1, count($data['track']));
+assert_eq('track: start_time correct', 36000, $data['track'][0]['start_time']);
+assert_eq('track: end_time equals start_time', 36000, $data['track'][0]['end_time']);
+assert_eq('track: task correct', 'task1', $data['track'][0]['task']);
+assert_eq('track: manual is 0', 0, $data['track'][0]['manual']);
+assert_eq('track: day correct', 20260507, $data['track'][0]['day']);
+
+// 5.3 Extend existing entry (within 60s window)
+$r = http_post_json("$base/track.php", [
+    'token' => $token,
+    'entries' => [['day' => 20260507, 'time' => 36030, 'task' => 'task1']],
+]);
+$data = json_decode($r['body'], true);
+assert_eq('track: still one row after extend', 1, count($data['track']));
+assert_eq('track: start_time unchanged', 36000, $data['track'][0]['start_time']);
+assert_eq('track: end_time extended', 36030, $data['track'][0]['end_time']);
+
+// 5.4 New entry after gap (>60s from last end_time)
+// highest end_time row: task1 end=36030. Task matches but 36030 > 36040? No → insert
+$r = http_post_json("$base/track.php", [
+    'token' => $token,
+    'entries' => [['day' => 20260507, 'time' => 36100, 'task' => 'task1']],
+]);
+$data = json_decode($r['body'], true);
+assert_eq('track: two rows after gap', 2, count($data['track']));
+
+// 5.5 Batch: task switch (two entries, same time)
+// highest end_time row: task1 row2 end=36100. Task matches, 36100 > 36070 → extend
+// highest end_time now: task1 row2 end=36130. Task mismatch (task1≠task3) → insert
+$r = http_post_json("$base/track.php", [
+    'token' => $token,
+    'entries' => [
+        ['day' => 20260507, 'time' => 36130, 'task' => 'task1'],
+        ['day' => 20260507, 'time' => 36130, 'task' => 'task3'],
+    ],
+]);
+$data = json_decode($r['body'], true);
+$task1Rows = array_values(array_filter($data['track'], fn($r) => $r['task'] === 'task1'));
+$task3Rows = array_values(array_filter($data['track'], fn($r) => $r['task'] === 'task3'));
+assert_eq('track: batch — task1 has 2 rows', 2, count($task1Rows));
+assert_eq('track: batch — task3 has 1 row', 1, count($task3Rows));
+assert_eq('track: batch — total 3 rows', 3, count($data['track']));
+
+// 5.6 Global lookup: recent entry for different task prevents extend
+// Day 20260509, 4 entries processed sequentially:
+//   task1@50000 → no rows → insert
+//   task1@50030 → highest: task1@50000, match + within 60s → extend to 50030
+//   task2@50050 → highest: task1@50030, mismatch → insert
+//   task1@50060 → highest: task2@50050, mismatch → insert (NOT extend old task1 row)
+$r = http_post_json("$base/track.php", [
+    'token' => $token,
+    'entries' => [
+        ['day' => 20260509, 'time' => 50000, 'task' => 'task1'],
+        ['day' => 20260509, 'time' => 50030, 'task' => 'task1'],
+        ['day' => 20260509, 'time' => 50050, 'task' => 'task2'],
+        ['day' => 20260509, 'time' => 50060, 'task' => 'task1'],
+    ],
+]);
+$data = json_decode($r['body'], true);
+assert_eq('track: global lookup — 3 rows', 3, count($data['track']));
+$t1 = array_values(array_filter($data['track'], fn($r) => $r['task'] === 'task1'));
+$t2 = array_values(array_filter($data['track'], fn($r) => $r['task'] === 'task2'));
+assert_eq('track: global lookup — task1 has 2 rows', 2, count($t1));
+assert_eq('track: global lookup — task2 has 1 row', 1, count($t2));
+usort($t1, fn($a, $b) => $a['start_time'] - $b['start_time']);
+assert_eq('track: global lookup — task1 row1 end_time', 50030, $t1[0]['end_time']);
+assert_eq('track: global lookup — task1 row2 is separate', 50060, $t1[1]['start_time']);
+
+// 5.9 Task switch across three requests
+// Request 1: task1@64077 → insert
+$r = http_post_json("$base/track.php", [
+    'token' => $token,
+    'entries' => [['day' => 20260510, 'time' => 64077, 'task' => 'task1']],
+]);
+$data = json_decode($r['body'], true);
+assert_eq('track: switch3 — req1 returns 1 row', 1, count($data['track']));
+assert_eq('track: switch3 — req1 task1 start', 64077, $data['track'][0]['start_time']);
+assert_eq('track: switch3 — req1 task1 end', 64077, $data['track'][0]['end_time']);
+
+// Request 2: task1@64093 extends, task2@64093 inserts
+$r = http_post_json("$base/track.php", [
+    'token' => $token,
+    'entries' => [
+        ['day' => 20260510, 'time' => 64093, 'task' => 'task1'],
+        ['day' => 20260510, 'time' => 64093, 'task' => 'task2'],
+    ],
+]);
+$data = json_decode($r['body'], true);
+assert_eq('track: switch3 — req2 returns 2 rows', 2, count($data['track']));
+$t1 = array_values(array_filter($data['track'], fn($r) => $r['task'] === 'task1'));
+$t2 = array_values(array_filter($data['track'], fn($r) => $r['task'] === 'task2'));
+assert_eq('track: switch3 — req2 task1 start', 64077, $t1[0]['start_time']);
+assert_eq('track: switch3 — req2 task1 end', 64093, $t1[0]['end_time']);
+assert_eq('track: switch3 — req2 task2 start', 64093, $t2[0]['start_time']);
+assert_eq('track: switch3 — req2 task2 end', 64093, $t2[0]['end_time']);
+
+// Request 3: task2@64107 extends task2 (highest end_time row, same task, within 60s)
+$r = http_post_json("$base/track.php", [
+    'token' => $token,
+    'entries' => [['day' => 20260510, 'time' => 64107, 'task' => 'task2']],
+]);
+$data = json_decode($r['body'], true);
+assert_eq('track: switch3 — req3 returns 2 rows', 2, count($data['track']));
+$t1 = array_values(array_filter($data['track'], fn($r) => $r['task'] === 'task1'));
+$t2 = array_values(array_filter($data['track'], fn($r) => $r['task'] === 'task2'));
+assert_eq('track: switch3 — req3 task1 unchanged start', 64077, $t1[0]['start_time']);
+assert_eq('track: switch3 — req3 task1 unchanged end', 64093, $t1[0]['end_time']);
+assert_eq('track: switch3 — req3 task2 start unchanged', 64093, $t2[0]['start_time']);
+assert_eq('track: switch3 — req3 task2 end extended', 64107, $t2[0]['end_time']);
+
+// 5.7 Different day returns only that day's rows
+$r = http_post_json("$base/track.php", [
+    'token' => $token,
+    'entries' => [['day' => 20260508, 'time' => 36000, 'task' => 'task1']],
+]);
+$data = json_decode($r['body'], true);
+assert_eq('track: different day — 1 row returned', 1, count($data['track']));
+assert_eq('track: different day — correct day', 20260508, $data['track'][0]['day']);
+
+// 5.8 Auth with uid
+$r = http_post_json("$base/track.php", [
+    'uid' => $testUid,
+    'entries' => [['day' => 20260508, 'time' => 36030, 'task' => 'task1']],
+]);
+assert_eq('track: uid auth returns 200', 200, $r['code']);
+
+echo "\n";
+
+// ============================================================
+echo "=== 6. conf.php ===\n";
+// ============================================================
+
+// 6.1 POST without auth
+$r = http_post_json("$base/conf.php", ['read' => ['foo']]);
+assert_eq('conf: missing auth returns 403', 403, $r['code']);
+
+// 6.2 Write values
+$r = http_post_json("$base/conf.php", [
+    'token' => $token,
+    'write' => ['theme' => 'dark', 'fontSize' => 14],
+]);
+assert_eq('conf: write returns 200', 200, $r['code']);
+$data = json_decode($r['body'], true);
+assert_eq('conf: write-only returns conf key', true, isset($data['conf']));
+
+// 6.3 Read values back
+$r = http_post_json("$base/conf.php", [
+    'token' => $token,
+    'read' => ['theme', 'fontSize'],
+]);
+$data = json_decode($r['body'], true);
+assert_eq('conf: read theme', 'dark', $data['conf']['theme']);
+assert_eq('conf: read fontSize', 14, $data['conf']['fontSize']);
+
+// 6.4 Write then read in same request
+$r = http_post_json("$base/conf.php", [
+    'token' => $token,
+    'write' => ['lang' => 'en'],
+    'read' => ['lang'],
+]);
+$data = json_decode($r['body'], true);
+assert_eq('conf: write-then-read returns new value', 'en', $data['conf']['lang']);
+
+// 6.5 Overwrite existing value
+$r = http_post_json("$base/conf.php", [
+    'token' => $token,
+    'write' => ['theme' => 'light'],
+    'read' => ['theme'],
+]);
+$data = json_decode($r['body'], true);
+assert_eq('conf: overwrite value', 'light', $data['conf']['theme']);
+
+// 6.6 Null clears a value
+$r = http_post_json("$base/conf.php", [
+    'token' => $token,
+    'write' => ['theme' => null],
+    'read' => ['theme'],
+]);
+$data = json_decode($r['body'], true);
+assert_eq('conf: null clears value', null, $data['conf']['theme']);
+
+// 6.7 Missing keys return null
+$r = http_post_json("$base/conf.php", [
+    'token' => $token,
+    'read' => ['nonexistent'],
+]);
+$data = json_decode($r['body'], true);
+assert_eq('conf: missing key returns null', null, $data['conf']['nonexistent']);
+
+// 6.8 Auth with uid
+$r = http_post_json("$base/conf.php", [
+    'uid' => $testUid,
+    'read' => ['lang'],
+]);
+$data = json_decode($r['body'], true);
+assert_eq('conf: uid auth works', 'en', $data['conf']['lang']);
 
 echo "\n";
 

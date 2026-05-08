@@ -1,12 +1,12 @@
 import { useState } from 'react';
 import {
   Container,
-  Tabs,
-  Tab,
   Box,
   TextField,
   Button,
   Typography,
+  Tabs,
+  Tab,
 } from '@mui/material';
 import TaskList from './TaskList';
 import HistoryView from './HistoryView';
@@ -61,7 +61,7 @@ export default function App() {
         <Tab label="History" />
       </Tabs>
       {tab === 0 && <TaskList uid={uid} />}
-      {tab === 1 && <HistoryView />}
+      {tab === 1 && <HistoryView uid={uid} />}
     </Container>
   );
 }
