@@ -3,6 +3,7 @@
 
 Usage:
   python3 monitor-gnome.py <base_url> <uid>
+    python3 monitor-gnome.py tmux-wrapper <session_name> <base_url> <uid>
 
 Example:
   python3 monitor-gnome.py http://localhost:8080/ CHANGE_ME_TO_RANDOM
@@ -20,11 +21,13 @@ import time
 import urllib.error
 import urllib.parse
 import urllib.request
+from pathlib import Path
 
 
 DBUS_FILTER = "type='signal',interface='org.gnome.ScreenSaver'"
 EVENT_RE = re.compile(r"boolean\s+(true|false)", re.IGNORECASE)
 KEEPALIVE_SECONDS = 60
+TMUX_POLL_SECONDS = 2
 
 
 def ts() -> str:
@@ -41,6 +44,7 @@ def log_err(msg: str) -> None:
 
 def usage() -> None:
     print("Usage: python3 monitor-gnome.py <base_url> <uid>")
+    print("       python3 monitor-gnome.py tmux-wrapper <session_name> <base_url> <uid>")
     print("Example: python3 monitor-gnome.py http://localhost:8080/ CHANGE_ME_TO_RANDOM")
 
 
@@ -206,6 +210,50 @@ def monitor_loop(base_url: str, uid: str) -> int:
                 proc.kill()
 
 
+def tmux_session_exists(session_name: str) -> bool:
+    try:
+        result = subprocess.run(
+            ["tmux", "has-session", "-t", session_name],
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+            check=False,
+        )
+    except FileNotFoundError:
+        return False
+
+    return result.returncode == 0
+
+
+def tmux_wrapper(session_name: str, base_url: str, uid: str) -> int:
+    if tmux_session_exists(session_name):
+        while tmux_session_exists(session_name):
+            time.sleep(TMUX_POLL_SECONDS)
+        return 1
+
+    try:
+        subprocess.run(
+            [
+                "tmux",
+                "new-session",
+                "-d",
+                "-s",
+                session_name,
+                str(Path(__file__).resolve()),
+                base_url,
+                uid,
+            ],
+            check=False,
+        )
+    except FileNotFoundError:
+        log_err("Error: tmux not found. Install package tmux.")
+        return 1
+
+    while tmux_session_exists(session_name):
+        time.sleep(TMUX_POLL_SECONDS)
+
+    return 1
+
+
 def main() -> int:
     if len(sys.argv) != 3:
         usage()
@@ -228,4 +276,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
+    if len(sys.argv) > 1 and sys.argv[1] == "tmux-wrapper":
+        if len(sys.argv) != 5:
+            usage()
+            raise SystemExit(1)
+        raise SystemExit(tmux_wrapper(sys.argv[2], sys.argv[3], sys.argv[4]))
     raise SystemExit(main())

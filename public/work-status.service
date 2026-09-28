@@ -1,0 +1,22 @@
+# How to set up the work status daemon:
+# - Fill missing fields in this file
+# - Put into /home/[USER]/.config/systemd/user/
+# - Reload the systemd: systemctl --user daemon-reload
+# - Enable the service: systemctl --user enable work-status
+# - Start the service: systemctl --user start work-status
+# - Show status: systemctl --user status work-status
+# - Attach to the tmux session: tmux attach-session -t [tmux-session-name]
+# - Detach from the tmux session: Ctrl+B then D
+
+[Unit]
+Description=Work status daemon
+
+[Service]
+Type=simple
+ExecStart=[FULL-PATH]/monitor-gnome.py tmux-wrapper [tmux-session-name] URL uuid
+ExecStop=/usr/bin/tmux kill-session -t [tmux-session-name]
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=default.target

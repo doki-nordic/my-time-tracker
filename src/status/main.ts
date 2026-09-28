@@ -55,7 +55,7 @@ const appEl = document.getElementById('app');
 if (!appEl) throw new Error('Missing #app');
 
 appEl.innerHTML = `
-  <video id="keepawake-video" muted autoplay loop playsinline src="./keepalive.mp4"></video>
+  <video id="keepawake-video" autoplay loop src="./awake.mp4" controls></video>
 
   <div class="topbar">
     <div class="topbar-left">
@@ -225,7 +225,9 @@ async function requestScreenWakeLock() {
 }
 
 function wireWakeLock() {
-  void keepAwakeVideo.play().catch(() => {});
+  setInterval(() => {
+    keepAwakeVideo.play().catch(() => {});
+  }, 3000); // Retry every 3 seconds
   void requestScreenWakeLock();
   document.addEventListener('visibilitychange', () => {
     if (document.visibilityState === 'visible') {
